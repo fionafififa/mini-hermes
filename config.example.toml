@@ -1,0 +1,12 @@
+# provider 实现名称，第二阶段接入
+provider = "openai_compatible"
+
+# 占位值，第二阶段替换成真实模型和服务地址
+model = "replace-in-stage-2"
+base_url = "https://example.com/v1"
+
+# 保存 API Key 的环境变量名称；这里不是密钥本身
+api_key_env = "MINI_HERMES_API_KEY"
+
+# 一个用户 Turn 最多允许多少次 agent 循环
+max_iterations = 8
