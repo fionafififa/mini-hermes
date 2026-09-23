@@ -4,4 +4,6 @@ version = "0.1.0"
 description = "A small AI agent built for learning."
 readme = "README.md"
 requires-python = ">=3.11"
-dependencies = []
+dependencies = [
+    "openai>=2.0,<3",
+]
