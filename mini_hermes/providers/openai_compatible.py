@@ -20,7 +20,11 @@ def to_api_message(message: Message) -> dict[str, Any]:
 
     result: dict[str, Any] = {
         "role": message.role,
-        "content": message.content,
+        "content": (
+            None
+            if message.role == "assistant" and not message.content and message.tool_calls
+            else message.content
+        )
     }
 
     if message.tool_calls:
@@ -30,10 +34,11 @@ def to_api_message(message: Message) -> dict[str, Any]:
                 "type": "function",
                 "function": {
                     "name": call.name,
-                    "arguments": json.dumps(
-                        call.arguments,
-                        ensure_ascii=False,
-                    ),
+                    "arguments": (
+                    call.raw_arguments
+                    if call.raw_arguments is not None
+                    else json.dumps(call.arguments, ensure_ascii=False)
+                ),
                 },
             }
             for call in message.tool_calls
@@ -91,17 +96,26 @@ class OpenAICompatibleProvider(LLMProvider):
 
         for call in raw_message.tool_calls or []:
             if call.type != "function":
-                raise ValueError(
-                    f"不支持的工具调用类型：{call.type}"
-                )
-            
+                raise ValueError(f"不支持的工具调用类型：{call.type}")
+
+            raw_arguments = call.function.arguments
+
+            try:
+                arguments = json.loads(raw_arguments)
+                if not isinstance(arguments, dict):
+                    raise ValueError("工具参数必须是 JSON 对象")
+                parse_error = None
+            except ValueError as exc:
+                arguments = {}
+                parse_error = f"工具参数解析失败：{exc}"
+
             tool_calls.append(
                 ToolCall(
                     id=call.id,
                     name=call.function.name,
-                    arguments=json.loads(
-                        call.function.arguments,
-                        ),
+                    arguments=arguments,
+                    raw_arguments=raw_arguments if parse_error else None,
+                    parse_error=parse_error,
                 )
             )
 

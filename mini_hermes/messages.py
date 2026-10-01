@@ -13,6 +13,8 @@ class ToolCall:
     id: str
     name: str
     arguments: dict[str, Any] = field(default_factory=dict)
+    raw_arguments: str | None = None  # 原始参数字符串，可能是 JSON 或其他格式
+    parse_error: str | None = None  # 如果解析失败，记录错误信息
 
     def __post_init__(self) -> None:
         if not isinstance(self.id, str) or not self.id.strip():
