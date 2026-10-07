@@ -5,5 +5,6 @@ description = "A small AI agent built for learning."
 readme = "README.md"
 requires-python = ">=3.11"
 dependencies = [
+    "anthropic>=1.11,<2",
     "openai>=2.0,<3",
 ]

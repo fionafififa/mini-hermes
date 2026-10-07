@@ -10,3 +10,10 @@ api_key_env = "MINI_HERMES_API_KEY"
 
 # 一个用户 Turn 最多允许多少次 agent 循环
 max_iterations = 8
+
+# 单次模型请求的输出 token 上限
+max_output_tokens = 1024
+
+# 如果使用 DeepSeek，将下面两行取消注释以关闭本阶段不支持的思考模式。
+# [extra_body.thinking]
+# type = "disabled"

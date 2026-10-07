@@ -2,8 +2,9 @@ from __future__ import annotations
 
 import os
 import tomllib
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
+from typing import Any
 
 
 @dataclass(frozen=True)
@@ -15,6 +16,8 @@ class AppConfig:
     base_url: str
     api_key_env: str = "MINI_HERMES_API_KEY"
     max_iterations: int = 8
+    max_output_tokens: int = 1024
+    extra_body: dict[str, Any] = field(default_factory=dict)
 
     def __post_init__(self) -> None:
         for name in ("provider", "model", "base_url", "api_key_env"):
@@ -23,12 +26,23 @@ class AppConfig:
             if not isinstance(value, str) or not value.strip():
                 raise ValueError(f"配置项 {name} 必须是非空字符串")
 
-        # bool 是 int 的子类，因此这里使用 type(...) is int。
-        if (
-            type(self.max_iterations) is not int
-            or self.max_iterations <= 0
-        ):
-            raise ValueError("max_iterations 必须是正整数")
+        for name in ("max_iterations", "max_output_tokens"):
+            value = getattr(self, name)
+
+            if type(value) is not int or value <= 0:
+                 # bool 是 int 的子类，因此这里使用 type(...) is int
+                raise ValueError(f"配置项 {name} 必须是正整数")
+
+        if not isinstance(self.extra_body, dict):
+            raise ValueError("配置项 extra_body 必须是对象（TOML table）")
+
+        # Provider 负责核心消息和调用上限；扩展参数不能覆盖它们。
+        reserved = {"model", "messages", "tools", "system", "max_tokens", "stream"}
+        conflicts = reserved.intersection(self.extra_body)
+        if conflicts:
+            raise ValueError(
+                f"extra_body 不能覆盖核心请求字段：{', '.join(sorted(conflicts))}"
+            )
 
 
 def load_config(path: str | Path = "config.toml") -> AppConfig:
@@ -55,4 +69,3 @@ def get_api_key(config: AppConfig) -> str:
 
     return api_key
 
-    

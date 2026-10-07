@@ -64,6 +64,7 @@ class OpenAICompatibleProvider(LLMProvider):
         #1. 将 Message 转换为 API 消息格式
         request: dict[str, Any] = {
             "model": self.config.model,
+            "max_tokens": self.config.max_output_tokens,
             "messages": [
                 to_api_message(m)
                 for m in messages
@@ -73,6 +74,9 @@ class OpenAICompatibleProvider(LLMProvider):
 
         if tools:
             request["tools"] = tools
+
+        if self.config.extra_body:
+            request["extra_body"] = self.config.extra_body
         
         #2.创建客户端并发送一次请求
         #with会在结束时关闭客户端连接

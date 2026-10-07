@@ -8,6 +8,7 @@ dist/
 
 # 本地配置与密钥
 config.toml
+config.anthropic.toml
 .env
 .env.*
 !.env.example

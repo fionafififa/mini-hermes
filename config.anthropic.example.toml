@@ -1,0 +1,11 @@
+# provider 表示协议适配器；这个示例用 Anthropic 协议调用 DeepSeek。
+provider = "anthropic"
+model = "deepseek-flash"
+base_url = "https://api.deepseek.com/anthropic"
+api_key_env = "ANTHROPIC_API_KEY"
+max_iterations = 8
+max_output_tokens = 1024
+
+# 第五阶段只保存文本和工具信息，不启用思考模式。
+[extra_body.thinking]
+type = "disabled"
