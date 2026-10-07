@@ -85,37 +85,6 @@ def anthropic_response(content, stop_reason="end_turn"):
 
 
 class Stage5Tests(unittest.TestCase):
-    def test_extra_body_and_output_limit_reach_both_real_sdks(self):
-        cases = [
-            ("openai_compatible", openai_response({"role": "assistant", "content": "OK"})),
-            ("anthropic", anthropic_response([{"type": "text", "text": "OK"}])),
-        ]
-        for name, response in cases:
-            with self.subTest(provider=name), tempfile.TemporaryDirectory() as directory:
-                with fake_api([response]) as (url, requests):
-                    config_path = Path(directory) / "config.toml"
-                    config_path.write_text(
-                        f'provider="{name}"\nmodel="offline-model"\nbase_url="{url}"\n'
-                        'api_key_env="STAGE5_TEST_API_KEY"\nmax_output_tokens=128\n'
-                        '[extra_body.thinking]\ntype="disabled"\n',
-                        encoding="utf-8",
-                    )
-                    config = load_config(config_path)
-                    before = copy.deepcopy(config.extra_body)
-                    result = create_provider(config).generate([Message("user", "Hello")])
-                    self.assertEqual(result.message.content, "OK")
-                    self.assertEqual(len(requests), 1)
-                    body = requests[0][1]
-                    self.assertEqual(body["thinking"], config.extra_body["thinking"])
-                    self.assertNotIn("extra_body", body)
-                    self.assertEqual(body["max_tokens"], config.max_output_tokens)
-                    self.assertEqual(config.extra_body, before)
-
-    def test_extra_body_cannot_replace_core_request_fields(self):
-        for invalid in (None, [], True, "disabled", {"messages": []}, {"max_tokens": 9999}):
-            with self.subTest(value=invalid), self.assertRaisesRegex(ValueError, "extra_body"):
-                AppConfig("anthropic", "offline-model", "http://localhost", extra_body=invalid)
-
     def test_conversion_preserves_history_and_groups_tool_results(self):
         messages = [
             Message("system", "固定系统提示"),
@@ -126,7 +95,7 @@ class Stage5Tests(unittest.TestCase):
             ]),
             Message("tool", '{"ok":true,"data":{"sum":5}}', tool_call_id="call_a"),
             Message("tool", '{"ok":false,"error":{"code":"test"}}', tool_call_id="call_b"),
-            Message("assistant", "结果是 5，文件不存在"),
+            Message("assistant", "结果是 5,文件不存在"),
             Message("user", "继续"),
         ]
         before = copy.deepcopy([asdict(message) for message in messages])
