@@ -9,7 +9,8 @@
 - [x] 阶段三：工具注册、执行与 Agent 多轮调用循环
 - [x] 阶段四：SQLite 会话持久化、恢复历史、整轮提交
 - [x] 阶段五：Provider 工厂、Anthropic 协议适配、恢复会话后切换 Provider
-- [ ] 后续：长期记忆、上下文压缩、工具重试
+- [x] 阶段六 P0：显式保存、更新和删除长期记忆；跨会话关键词召回与长度限制
+- [ ] 后续：上下文压缩、工具重试，以及更完善的记忆管理
 
 ## 第五阶段的主流程
 
@@ -42,6 +43,25 @@ Anthropic 的消息体不使用 `role="tool"`：模型请求工具时返回 assi
 
 `provider="anthropic"` 表示使用 Anthropic **协议**，不代表必须调用 Anthropic **公司**的服务。
 本项目的示例用这套协议访问 DeepSeek，仍然使用 DeepSeek 的 Key。
+
+## 第六阶段的记忆流程（P0）
+
+```text
+/remember key=value | 关键词1,关键词2 → MemoryStore → data/memory.db
+新问题 → 按关键词召回最多 3 条记忆 → 与本轮问题组成一条 user 消息
+       → 原有 Agent / Provider / 工具循环 → SessionStore 保存本轮消息
+```
+
+`data/sessions.db` 保存每个会话的消息历史；`data/memory.db` 保存跨会话使用的记忆。
+同一个 `key` 再次保存会更新原记录。`/forget key` 从记忆库删除记录，但不会改写过去已保存的会话消息。
+记忆命令由 CLI 直接执行，不调用模型。只有普通问题才会按关键词召回相关记忆。
+
+召回时按命中的完整关键词数量排序，默认最多 3 条，整个记忆参考块最多 1000 个字符；
+超出预算的记录会被整条跳过。这里的限制按字符计算，不是 token 预算，也不控制累积的会话历史长度。
+本阶段使用一个共享的记忆数据库，还没有用户或项目隔离、自动记忆提取或语义检索。
+
+关键文件：`mini_hermes/memory.py` 负责 SQLite 记忆读写和召回，
+`mini_hermes/agent.py` 在每轮模型调用前召回一次，`mini_hermes/stage6.py` 提供记忆命令和启动入口。
 
 ## 运行（Windows PowerShell）
 
@@ -169,15 +189,47 @@ PowerShell 命令必须在退出程序后执行，不能粘贴到 `你：` 提�
 
 早期入口仍保留：`stage2` 单次调用，`stage3` 进程内工具循环，`stage4` OpenAI 兼容协议的会话持久化。
 
+### 5. 使用第六阶段长期记忆
+
+沿用上一节的配置和 API Key，启动阶段六：
+
+```powershell
+.\.venv\Scripts\python.exe -m mini_hermes.stage6 --config config.toml
+```
+
+也可以把配置换成 `config.anthropic.toml`。默认会话数据库是 `data/sessions.db`，
+记忆数据库是 `data/memory.db`；可分别通过 `--db` 和 `--memory-db` 指定其他路径。
+`--list` 列出会话，`--session '会话ID'` 恢复指定会话。
+
+在程序的 `你：` 提示符中输入：
+
+```text
+/remember example_language=我偏好 Python 代码示例 | 代码,编程,示例
+/memories
+```
+
+`/memories` 应显示 `example_language=我偏好 Python 代码示例 | 代码,编程,示例`。
+命令格式中的 `=`、`|`、`,` 使用英文半角符号，关键词直接写成逗号分隔的文本，无需加列表括号或引号。
+
+输入 `/exit`，重新运行阶段六且不加 `--session`，再问“给我一个简单的代码示例。”。
+新会话虽然没有旧聊天历史，仍能从 `memory.db` 召回这条记忆；输入 `/history`，
+查看本轮 user 消息中是否包含记忆参考块。应以请求内容为验收依据，不只看模型是否恰好回答了 Python。
+
+再次使用 `/remember example_language=我偏好 TypeScript 代码示例 | 代码,编程,示例`
+会更新同一条记忆；`/forget example_language` 会删除它。测试删除效果时请新建会话，
+因为旧会话历史中已保存的记忆快照不会被删除。
+
 ## 当前边界与排错
 
-- 第五阶段尚不支持思考模式。DeepSeek 默认开启思考，示例通过 `thinking.type="disabled"` 显式关闭。
+- 当前适配器尚不支持思考模式。DeepSeek 默认开启思考，示例通过 `thinking.type="disabled"` 显式关闭。
   未关闭时 Anthropic 响应可能包含 `thinking` 块，当前适配器会报“未知类型：thinking”。
   不能只丢弃思考信息后声称完整支持：思考模式下的工具历史还可能要求回传相应信息。
   参考 [DeepSeek 思考模式文档](https://api-docs.deepseek.com/zh-cn/guides/thinking_mode/)。
 - Provider 异常不会提交本轮消息；Anthropic 输出达到 `max_output_tokens` 时也不会提交或执行其中的工具调用。
   可以增大输出上限后重试。会话事务只能保护消息记录，不能撤销已经发生的外部工具副作用。
 - `read_file` 只能读取当前项目目录内的 UTF-8 文件，最多返回前 12000 个字符。
+- 第六阶段的关键词按完整字符串匹配，不做同义词或语义匹配；未命中时直接发送原问题。
+  如果 `/memories` 把关键词显示成逐字逗号分隔，请检查读取数据库时是否用 `json.loads(keywords)` 还原列表。
 - `AuthenticationError` 或空正文 400 不能靠猜测参数定位。先核对当前配置的 `api_key_env`，
   再查询模型列表，最后验证最小消息请求；两个变量“都有值”不代表其中内容相同。
   API 地址与 Key 的服务来源必须匹配。
@@ -197,10 +249,12 @@ SDK 自动请求 `/v1/messages`，不要在配置地址上重复追加该路径�
 .\.venv\Scripts\python.exe -m unittest discover -s tests -v
 ```
 
-2026-10-07 验证：14 个测试通过，不需要真实 API Key，也不调用收费模型服务。
+2026-10-08 验证：14 个测试通过，不需要真实 API Key，也不调用收费模型服务。
 覆盖消息和配置校验、错误工具参数、工具结果回传、历史保留、SQLite 恢复与失败时整轮不提交。
 第五阶段还通过真实 SDK 访问本地 HTTP 服务，验证两种协议的转换、跨协议恢复、额外请求参数透传、
 输出上限透传和截断响应处理；不只是替换 Provider 返回值的 mock 测试。
+第六阶段另验证了关键词从 SQLite 恢复为列表、完整关键词匹配、记忆进入模型请求，
+以及有无召回时的消息保存和会话恢复。
 
 ### 真实接口验证
 
@@ -228,5 +282,11 @@ feat(stage5): 支持双协议 Provider 切换与 DeepSeek 非思考模式
 - 新增 Provider 工厂和 Anthropic 消息、工具及响应适配
 - 保留统一 Agent 循环与 SQLite 历史，支持恢复后跨协议切换
 - 增加 extra_body 配置透传和输出上限，示例显式关闭思考模式
-- 更新配置模板与 README，14 个离线测试及真实 CLI 工具链路通过
+- 更新配置模板与 README，离线测试及真实 CLI 工具链路通过
+```
+
+第六阶段变更的简短英文提交说明：
+
+```text
+feat(stage6): add persistent keyword-based memory and usage docs
 ```

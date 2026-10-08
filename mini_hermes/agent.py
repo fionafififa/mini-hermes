@@ -4,6 +4,7 @@ from mini_hermes.messages import Message
 from mini_hermes.providers.base import LLMProvider
 from mini_hermes.session_store import SessionStore
 from mini_hermes.tools.registry import ToolRegistry
+from mini_hermes.memory import MemoryStore
 
 
 class Agent:
@@ -16,6 +17,7 @@ class Agent:
         *,
         store: SessionStore | None = None,
         session_id: str | None = None,
+        memory: MemoryStore | None = None,
     ) -> None:
         if max_iterations < 1:
             raise ValueError("max_iterations 必须大于等于 1。")
@@ -30,6 +32,7 @@ class Agent:
         self.max_iterations = max_iterations
         self.store = store
         self.session_id = session_id
+        self.memory = memory
 
         if store is not None and session_id is not None:
             #恢复历史会话时使用数据库中的原始system_prompt
@@ -74,16 +77,30 @@ class Agent:
 
 
 
+
  
     def run_turn(self, user_input: str) -> str:
         """运行一次交互回合，返回模型的最终文本回复。"""
         if not user_input.strip():
             raise ValueError("用户输入不能为空。")
 
-        #本轮现在副本上运行；失败时，已有会话保持完整。
+        #每轮只召回一次；工具循环使用同一份记忆快照。
+        recalled = (
+            self.memory.recall(user_input)
+            if self.memory is not None
+            else ""
+        )
+
+        user_content = (
+            f"{recalled}\n\n【当前用户输入】\n{user_input}"
+            if recalled
+            else user_input
+        )
+
+        # 本轮先在副本上运行；失败时，已有会话保持完整。
         messages = [
             *self.messages,
-            Message(role="user", content=user_input),  
+            Message(role="user", content=user_content),
         ]
 
         #一次迭代就是一次模型请求，一次回复可以包含多个工具调用。
