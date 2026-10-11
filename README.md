@@ -11,8 +11,9 @@
 - [x] 阶段五：Provider 工厂、Anthropic 协议适配、恢复会话后切换 Provider
 - [x] 阶段六 P0：显式保存、更新和删除长期记忆；跨会话关键词召回与长度限制
 - [x] 阶段六 P1：用户／项目记忆分区、来源与 UTC 时间、范围内更新、召回诊断、P0 数据迁移
-- [ ] 阶段七：上下文压缩；结合压缩流程接入压缩前记忆保存检查点
-- [ ] 阶段八：工具重试与失败处理
+- [x] 阶段七 P0：上下文预算、完整旧回合裁剪；仅裁剪请求视图，保留完整会话历史
+- [ ] 阶段七后续：摘要压缩、压缩前记忆保存检查点
+- [x] 阶段八 P0：工具安全重试、有限次数与退避、参数隔离、失败结果回传和中断传播
 - [ ] 记忆后续：自动提炼、语义检索、版本历史与会话归属校验
 
 ## 第五阶段的主流程
@@ -111,6 +112,60 @@ P0 未保存原始时间，因此迁移记录的创建／更新时间仅代表�
 
 关键文件：`mini_hermes/memory.py` 负责 SQLite 记忆读写和召回，
 `mini_hermes/agent.py` 在每个用户回合（Turn）开始时召回一次，`mini_hermes/stage6.py` 提供记忆命令和启动入口。
+
+## 第七阶段 P0：上下文预算与请求视图裁剪
+
+`mini_hermes/context.py` 的 `ContextBudget` 在每次模型请求前检查预算，包括消息、工具调用、工具结果和工具定义。
+输入上限为 `(context_window - reserved_output_tokens) × 0.8` 向下取整；先预留输出，再留 20% 输入余量。
+当前 token 估算是教学用字符粗估，不是真实 tokenizer，也不保证请求绝不会超出服务端窗口。
+
+超过预算时，按完整旧用户回合从最早开始移除；原始 system 和当前整个回合始终保留，工具调用与结果不拆散。
+裁剪只生成发给 Provider 的 `request_messages`，不覆盖 Agent 的完整工作历史，也不删除 SQLite 消息。
+工具返回大结果后，下次模型请求前会重新检查预算；若当前回合本身仍然放不下，就明确报错，不提交本轮历史。
+
+功能接在 `stage6.py` 的 `--context-window` 和 `--context-log`，没有独立的 `stage7.py` 入口。
+未传 `--context-window` 时不启用预算裁剪。本阶段尚未实现模型摘要压缩或压缩前记忆保存检查点。
+
+## 第八阶段 P0：工具重试与失败处理
+
+```text
+Agent 收到 ToolCall → ToolRegistry.execute(call)
+  → 参数解析检查、查找 ToolSpec
+  → 按安全开关与 RetryPolicy 调用 handler(独立参数副本)
+  → 成功，或有限重试结束
+  → 包装原有 JSON 字符串 → 一条最终 tool 消息 → 下一次模型请求
+```
+
+关键文件：
+
+- `mini_hermes/tools/retry.py`：`TemporaryToolError`、`RetryPolicy` 和 `call_with_retry`。
+- `mini_hermes/tools/registry.py`：保留 `register(spec)`、`execute(call)` 和 `handler(args)`，在工具执行内部接入重试。
+- `tests/test_stage8.py`：验证次数、退避、错误分类、参数隔离、中断，以及 Agent／记忆／上下文／SQLite 衔接。
+
+### 开启条件与等待规则
+
+工具必须同时配置 `safe_to_retry=True`、允许多次的 `RetryPolicy`，并抛出 `TemporaryToolError`，才会再次执行。
+`max_attempts` 是包含第一次执行的总次数；默认是 1。即使配置了 3 次，安全开关为 False 时仍只执行一次。
+失败后的等待从 `base_delay_seconds` 开始，每次翻倍但不超过 `max_delay_seconds`；最后一次失败后不再等待。
+例如总次数 3、初始等待 0.1 秒、上限 0.15 秒，最多产生两次等待：0.1、0.15 秒。
+
+`TemporaryToolError` 只表示失败可能恢复，不表示重复执行安全。`safe_to_retry` 由工具开发者根据副作用语义判断，
+并不自动提供幂等保证。现有 `add_numbers` 和 `read_file` 沿用默认配置，没有人为开启重试。
+后续网络工具需要在适配器中识别临时故障，再明确抛出此异常；本阶段不自动重试所有网络异常。
+
+### 兼容与失败语义
+
+每次尝试对 `call.arguments` 做深复制，避免工具修改嵌套参数后污染下一次执行或已记录的 ToolCall。
+成功仍返回 `{"ok": true, "data": ...}`；耗尽次数仍返回
+`{"ok": false, "error": {"code": "execution_error", "message": ...}}`。
+参数解析失败或未知工具不执行 handler；`ValueError`／`FileNotFoundError` 仍作为 `invalid_arguments` 返回，
+普通异常不自动重试。`InterruptedError` 向上传递；`KeyboardInterrupt` 不被普通异常处理捕获。
+
+三次内部尝试只对应同一个调用 ID 和一条最终 tool 消息，不增加模型调用次数，也不改变模型可见的工具 schema。
+`max_attempts` 限制工具执行次数，`Agent.max_iterations` 限制模型请求次数，两者独立。
+Provider SDK 的 `max_retries=0` 保持不变，阶段八没有增加模型请求重试。
+重试日志只记录工具名、尝试序号和计划等待，不记录参数或原始异常；返回给模型的错误 message 仍包含异常信息，
+具体工具应避免把密钥或敏感内容写进异常文本。
 
 ## 运行（Windows PowerShell）
 
@@ -305,6 +360,27 @@ PowerShell 命令必须在退出程序后执行，不能粘贴到 `你：` 提�
 Bob 的 `/memories` 不应出现 `default` 用户的条目。测试项目分区可以保持 `--user default`，
 将 `--project` 换成另一个固定路径；新项目仍能使用用户范围记忆，但不能使用原项目范围的记录。
 
+### 6. 启用上下文预算并验证阶段八
+
+沿用阶段六入口，可启用请求预算和裁剪日志：
+
+```powershell
+.\.venv\Scripts\python.exe -m mini_hermes.stage6 --config config.toml --context-window 8192 --context-log
+```
+
+`8192` 是实验预算示例，应根据实际模型窗口与配置中的输出上限设置；这不是服务端窗口的自动检测结果。
+长会话中观察 `context` 日志的估算值和 `dropped_turns`；`/history` 仍显示完整历史，不是裁剪后的请求视图。
+正常对话仍会请求模型服务并产生相应用量。
+
+阶段八没有单独的 CLI 入口。无需 API Key 的确定性验证命令为：
+
+```powershell
+.\.venv\Scripts\python.exe -B -X utf8 -m unittest discover -s tests -p test_stage8.py -v
+```
+
+测试里的 `flaky`／`fetch` 工具模拟暂时性失败并明确开启安全重试，不会注册进日常 CLI 的默认工具集合。
+`sleep=waits.append` 只记录计划等待，不真的休眠；正常创建 `ToolRegistry()` 时仍使用 `time.sleep`。
+
 ## 当前边界与排错
 
 - 当前适配器尚不支持思考模式。DeepSeek 默认开启思考，示例通过 `thinking.type="disabled"` 显式关闭。
@@ -314,6 +390,10 @@ Bob 的 `/memories` 不应出现 `default` 用户的条目。测试项目分区�
 - Provider 异常不会提交本轮消息；Anthropic 输出达到 `max_output_tokens` 时也不会提交或执行其中的工具调用。
   可以增大输出上限后重试。会话事务只能保护消息记录，不能撤销已经发生的外部工具副作用。
 - `read_file` 只能读取当前项目目录内的 UTF-8 文件，最多返回前 12000 个字符。
+- 第七阶段只裁剪请求视图，不做摘要生成；当前回合或工具定义本身超出预算时会停止本轮。
+  上下文失败后的消息回滚不能撤销已经发生的工具副作用。
+- 第八阶段已支持显式、安全、有界的工具重试，但没有通用网络错误映射、随机抖动或总体执行时限。
+  写入、发送、付款等工具必须自行解决幂等和结果不确定性；不能仅设置 `safe_to_retry=True` 就认为没有重复副作用。
 - 第六阶段的关键词按完整字符串匹配，不做同义词或语义匹配；未命中时直接发送原问题。
   如果 `/memories` 把关键词显示成逐字逗号分隔，请检查读取数据库时是否用 `json.loads(keywords)` 还原列表。
 - P1 已隔离记忆记录，但尚未给 `SessionStore` 增加用户／项目归属字段，`--list` 也不是按用户筛选的会话列表。
@@ -336,10 +416,11 @@ SDK 自动请求 `/v1/messages`，不要在配置地址上重复追加该路径�
 ### 离线回归
 
 ```powershell
-.\.venv\Scripts\python.exe -m unittest discover -s tests -v
+.\.venv\Scripts\python.exe -B -X utf8 -m unittest discover -s tests -v
 ```
 
-2026-10-09 验证：16 个测试通过，不需要真实 API Key，也不调用收费模型服务。
+2026-10-11 在实际 `mini-hermes` 工作区重新验证：20 个测试全部通过，退出码 0；
+不需要真实 API Key，也不调用收费模型服务。此前 2026-10-09 的阶段六 P1 基线为 16 个测试。
 覆盖消息和配置校验、错误工具参数、工具结果回传、历史保留、SQLite 恢复与失败时整轮不提交。
 第五阶段还通过真实 SDK 访问本地 HTTP 服务，验证两种协议的转换、跨协议恢复、额外请求参数透传、
 输出上限透传和截断响应处理；不只是替换 Provider 返回值的 mock 测试。
@@ -348,7 +429,16 @@ SDK 自动请求 `/v1/messages`，不要在配置地址上重复追加该路径�
 P1 新增 `tests/test_stage6_p1.py`，验证真实旧表迁移的固定归属、删除后重启不复活，
 以及同数据库用户／项目切换、项目同名覆盖、范围内更新与删除、来源与时间、完整字符预算和召回日志。
 通过实际 Agent 调用验证更新记忆后只改变后续 user 消息，已提交前缀、system prompt 和恢复后的历史保持不变。
+阶段七新增 `tests/test_stage7.py` 的 2 个测试，验证请求预算、工具调用／结果成对保留、召回快照、
+完整历史保存恢复，以及当前输入、工具定义或工具结果放不下时不提交本轮。
+阶段八新增 `tests/test_stage8.py` 的 2 个测试（含多个子场景），验证临时失败恢复、次数耗尽、
+参数错误和普通错误不重试、安全开关、默认一次、首次成功、深复制隔离，以及两种中断异常不重试。
+通过真实 Agent 和临时 SQLite 验证：工具内部尝试 3 次，只产生一条最终工具结果，模型请求仍为 2 次；
+记忆召回、上下文预算、schema 稳定、保存恢复和 Anthropic `is_error` 标识保持正确。
 这些是离线回归结果，不代表本轮重新验证了远程模型服务。
+
+本次验收的 Git HEAD 为阶段七提交 `01704bc`；阶段八源码与测试已在工作区实现，验收时尚未提交。
+开发完成、Git 提交和远程发布是不同状态，本轮没有执行提交或核实远程发布。
 
 ### 真实接口验证
 
@@ -394,4 +484,15 @@ feat(memory): add scoped provenance, migration and recall diagnostics
 - Track latest source/session and UTC timestamps while preserving creation time on updates
 - Migrate P0 records once and add whole-record recall diagnostics
 - Cover scoped memory behavior and immutable conversation history with offline tests
+```
+
+第八阶段可使用的提交说明（仅建议，本轮未执行提交）：
+
+```text
+feat(stage8): add safe bounded tool retries and preserve execution contracts
+
+- Add explicit transient tool errors, bounded attempts and capped backoff
+- Preserve ToolSpec registration, ToolCall execution and result JSON contracts
+- Isolate arguments per attempt and propagate interruption signals
+- Verify one final tool result, session restore and prior-stage regression
 ```
