@@ -7,6 +7,7 @@ from pathlib import Path
 
 from mini_hermes.agent import Agent
 from mini_hermes.config import load_config
+from mini_hermes.context import ContextBudget
 from mini_hermes.memory import MemoryStore
 from mini_hermes.providers.factory import create_provider
 from mini_hermes.session_store import SessionStore
@@ -73,6 +74,11 @@ def main() -> None:
         help="项目记忆分区路径；不改变工具工作目录",
     )
     parser.add_argument("--memory-log", action="store_true", help="显示每轮召回诊断")
+    parser.add_argument(
+        "--context-window", type=int,
+        help="启用上下文预算；填写模型窗口 token 数，也可设置更小值进行实验",
+    )
+    parser.add_argument("--context-log", action="store_true", help="显示请求裁剪诊断")
     group = parser.add_mutually_exclusive_group()
     group.add_argument("--session", help="恢复指定会话；须保持原用户和项目不变")
     group.add_argument("--list", action="store_true", help="列出会话")
@@ -81,6 +87,9 @@ def main() -> None:
     logging.basicConfig(level=logging.WARNING, format="%(message)s")
     logging.getLogger("mini_hermes.memory").setLevel(
         logging.INFO if args.memory_log else logging.WARNING
+    )
+    logging.getLogger("mini_hermes.context").setLevel(
+        logging.INFO if args.context_log else logging.WARNING
     )
     project_id = os.path.normcase(str(args.project.resolve()))
 
@@ -103,6 +112,11 @@ def main() -> None:
                 store=store,
                 session_id=args.session,
                 memory=memory,
+                context=(
+                    ContextBudget(args.context_window, config.max_output_tokens)
+                    if args.context_window is not None
+                    else None
+                ),
             )
             print(f"模型：{config.provider} / {config.model}")
             print(f"会话数据库：{store.db_path}")

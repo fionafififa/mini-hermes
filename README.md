@@ -110,7 +110,7 @@ P0 未保存原始时间，因此迁移记录的创建／更新时间仅代表�
 `/forget` 删除的是新表有效记录，不会清除旧表、数据库备份或会话历史，不是隐私彻底擦除。
 
 关键文件：`mini_hermes/memory.py` 负责 SQLite 记忆读写和召回，
-`mini_hermes/agent.py` 在每轮模型调用前召回一次，`mini_hermes/stage6.py` 提供记忆命令和启动入口。
+`mini_hermes/agent.py` 在每个用户回合（Turn）开始时召回一次，`mini_hermes/stage6.py` 提供记忆命令和启动入口。
 
 ## 运行（Windows PowerShell）
 
